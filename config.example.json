@@ -1,0 +1,21 @@
+{
+  "port": 8443,
+  "claude_bin": "claude",
+  "max_parallel_claude": 2,
+  "history_dir": "~/.telegram-claude-bridge/history",
+  "allowed_chat_ids": [
+    "YOUR_TELEGRAM_USER_ID"
+  ],
+  "agents": [
+    {
+      "name": "assistant",
+      "display_name": "My Assistant",
+      "token": "YOUR_BOT_TOKEN_FROM_BOTFATHER"
+    },
+    {
+      "name": "coder",
+      "display_name": "Code Helper",
+      "token": "ANOTHER_BOT_TOKEN"
+    }
+  ]
+}
