@@ -1,0 +1,17 @@
+[tool.pytest.ini_options]
+# Run tests from the repo root so `import webhook_server` works without install.
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["webhook_server"]
+
+[tool.coverage.report]
+show_missing = true
+# main()'s serve_forever loop and the __main__ guard aren't unit-tested.
+exclude_lines = [
+    "if __name__ == .__main__.:",
+    "server.serve_forever",
+    "raise SystemExit",
+]
