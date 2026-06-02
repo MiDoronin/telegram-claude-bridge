@@ -107,6 +107,12 @@ cp launchd/com.telegram-claude-funnel.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.telegram-claude-funnel.plist
 ```
 
+> **Note:** `com.telegram-claude-funnel.plist` assumes the Tailscale CLI is at
+> `/usr/local/bin/tailscale` (the Homebrew/standalone install location). If you
+> installed Tailscale from the Mac App Store, the CLI lives at
+> `/Applications/Tailscale.app/Contents/MacOS/Tailscale` instead — edit the
+> `ProgramArguments` path in the plist to match. Run `which tailscale` to check.
+
 ## Running as a service (Linux)
 
 ```bash
