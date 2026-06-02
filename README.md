@@ -126,7 +126,7 @@ sudo systemctl start telegram-claude-bridge
 | `claude_bin` | Path to Claude CLI binary | `claude` |
 | `max_parallel_claude` | Max concurrent Claude sessions | `2` |
 | `history_dir` | Conversation history directory | `~/.telegram-claude-bridge/history` |
-| `allowed_chat_ids` | Telegram user IDs allowed to use bots | `[]` (empty = allow all) |
+| `allowed_chat_ids` | Telegram user IDs allowed to use bots (**required, non-empty**) | — |
 | `agents` | Array of bot configurations | required |
 
 ### Agent config
@@ -136,6 +136,11 @@ sudo systemctl start telegram-claude-bridge
 | `name` | Agent identifier (used in routing and history) |
 | `display_name` | Name shown to Claude in the prompt prefix |
 | `token` | Telegram bot token from BotFather |
+
+> **Security:** `allowed_chat_ids` must list the Telegram user IDs permitted to
+> use the bots, and must not be empty. This bridge runs the Claude CLI on your
+> machine, so the server **refuses to start** without an allowlist rather than
+> exposing an unrestricted bot to anyone who finds it.
 
 ## Architecture
 

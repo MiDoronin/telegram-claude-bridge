@@ -23,6 +23,9 @@ from pathlib import Path
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
 
+# Telegram caps message text at 4096 chars; chunk a little below that.
+MAX_MESSAGE_CHARS = 4000
+
 
 def load_config():
     if CONFIG_PATH.exists():
@@ -31,26 +34,52 @@ def load_config():
     return {}
 
 
+def build_bots(config):
+    """Build the routing tables from a config dict.
+
+    Returns (bots, bot_names, token_to_agent):
+      bots           -- agent_name -> token
+      bot_names      -- agent_name -> display_name
+      token_to_agent -- token_prefix -> agent_name
+
+    Raises ValueError on malformed config (missing keys, or two bots sharing a
+    token prefix) so misconfiguration fails loudly at startup instead of
+    silently dropping a bot from the routing table.
+    """
+    bots = {}
+    bot_names = {}
+    token_to_agent = {}
+
+    for agent in config.get("agents", []):
+        try:
+            name = agent["name"]
+            token = agent["token"]
+        except KeyError as e:
+            raise ValueError(f"agent config missing required key: {e}")
+
+        prefix = token.split(":")[0]
+        if prefix in token_to_agent:
+            raise ValueError(
+                f"duplicate bot token prefix {prefix!r}: agents "
+                f"{token_to_agent[prefix]!r} and {name!r} would collide in routing"
+            )
+
+        bots[name] = token
+        bot_names[name] = agent.get("display_name", name)
+        token_to_agent[prefix] = name
+
+    return bots, bot_names, token_to_agent
+
+
 CONFIG = load_config()
 PORT = int(os.environ.get("WEBHOOK_PORT", CONFIG.get("port", 8443)))
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", CONFIG.get("claude_bin", "claude"))
 ALLOWED_CHATS = set(str(x) for x in CONFIG.get("allowed_chat_ids", []))
 MAX_PARALLEL = int(os.environ.get("MAX_PARALLEL", CONFIG.get("max_parallel_claude", 2)))
 
-# Build bot mappings from config
-BOTS = {}  # agent_name -> token
-BOT_NAMES = {}  # agent_name -> display_name
-TOKEN_TO_AGENT = {}  # token_prefix -> agent_name
-
-for agent in CONFIG.get("agents", []):
-    name = agent["name"]
-    token = agent["token"]
-    BOTS[name] = token
-    BOT_NAMES[name] = agent.get("display_name", name)
-    TOKEN_TO_AGENT[token.split(":")[0]] = name
+BOTS, BOT_NAMES, TOKEN_TO_AGENT = build_bots(CONFIG)
 
 HISTORY_DIR = Path(CONFIG.get("history_dir", "~/.telegram-claude-bridge/history")).expanduser()
-HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 
 _claude_semaphore = threading.Semaphore(MAX_PARALLEL)
 
@@ -63,8 +92,10 @@ def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def save_history(agent, role, text):
-    hist_file = HISTORY_DIR / f"{agent}.jsonl"
+def save_history(agent, role, text, history_dir=None):
+    hist_dir = Path(history_dir) if history_dir is not None else HISTORY_DIR
+    hist_dir.mkdir(parents=True, exist_ok=True)
+    hist_file = hist_dir / f"{agent}.jsonl"
     entry = json.dumps({"role": role, "text": text, "ts": time.time()}, ensure_ascii=False)
     with open(hist_file, "a") as f:
         f.write(entry + "\n")
@@ -77,6 +108,59 @@ def tg_call(token, method, data):
         urllib.request.urlopen(urllib.request.Request(url, data=encoded), timeout=20)
     except Exception:
         pass
+
+
+def route_agent(path, token_to_agent):
+    """Map a request path like '/webhook/<token_prefix>' to an agent name."""
+    parts = path.strip("/").split("/")
+    if len(parts) >= 2 and parts[0] == "webhook":
+        return token_to_agent.get(parts[1])
+    return None
+
+
+def extract_message(update):
+    """Pull (chat_id, text) out of a Telegram update.
+
+    Falls back from message to edited_message, and from text to caption.
+    Returns (None, None) when the update carries no message.
+    """
+    msg = update.get("message") or update.get("edited_message")
+    if not msg:
+        return None, None
+    chat_id = str(msg.get("chat", {}).get("id", ""))
+    text = msg.get("text") or msg.get("caption") or ""
+    return chat_id, text
+
+
+def is_authorized(chat_id, allowed_chats):
+    """Fail-closed authorization: only chats in the allowlist are allowed.
+
+    An empty allowlist denies everyone (the server refuses to start without one
+    — see main()), so this never silently allows all.
+    """
+    return chat_id in allowed_chats
+
+
+def chunk_response(response, size=MAX_MESSAGE_CHARS):
+    """Split a response into Telegram-sized chunks."""
+    return [response[i:i + size] for i in range(0, len(response), size)]
+
+
+def run_claude(text, name):
+    """Run the Claude CLI for one message, mapping failures to user text."""
+    with _claude_semaphore:
+        try:
+            result = subprocess.run(
+                [CLAUDE_BIN, "-p", "--output-format", "text"],
+                input=f"[{name}] {text}",
+                capture_output=True, text=True, timeout=120,
+                cwd=str(Path.home())
+            )
+            return result.stdout.strip() or "Could not process. Try again."
+        except subprocess.TimeoutExpired:
+            return "Request timed out."
+        except Exception as e:
+            return f"Error: {e}"
 
 
 def process_message(agent, text, chat_id):
@@ -96,27 +180,14 @@ def process_message(agent, text, chat_id):
 
     save_history(agent, "user", text)
 
-    with _claude_semaphore:
-        try:
-            result = subprocess.run(
-                [CLAUDE_BIN, "-p", "--output-format", "text"],
-                input=f"[{name}] {text}",
-                capture_output=True, text=True, timeout=120,
-                cwd=str(Path.home())
-            )
-            response = result.stdout.strip() or "Could not process. Try again."
-        except subprocess.TimeoutExpired:
-            response = "Request timed out."
-        except Exception as e:
-            response = f"Error: {e}"
-        finally:
-            stop_typing.set()
+    try:
+        response = run_claude(text, name)
+    finally:
+        stop_typing.set()
 
     save_history(agent, "assistant", response)
 
-    # Send response
-    chunks = [response[i:i + 4000] for i in range(0, len(response), 4000)]
-    for chunk in chunks:
+    for chunk in chunk_response(response):
         tg_call(token, "sendMessage", {"chat_id": chat_id, "text": chunk})
 
     log(f"OUT [{agent}] {response[:60]}...")
@@ -129,13 +200,7 @@ def process_message(agent, text, chat_id):
 
 class WebhookHandler(BaseHTTPRequestHandler):
     def do_POST(self):
-        path = self.path.strip("/")
-        parts = path.split("/")
-
-        agent = None
-        if len(parts) >= 2 and parts[0] == "webhook":
-            token_prefix = parts[1]
-            agent = TOKEN_TO_AGENT.get(token_prefix)
+        agent = route_agent(self.path, TOKEN_TO_AGENT)
 
         # Always respond 200 immediately
         self.send_response(200)
@@ -154,15 +219,13 @@ class WebhookHandler(BaseHTTPRequestHandler):
         except Exception:
             return
 
-        msg = update.get("message") or update.get("edited_message")
-        if not msg:
+        chat_id, text = extract_message(update)
+        if not chat_id:
             return
 
-        chat_id = str(msg.get("chat", {}).get("id", ""))
-        if ALLOWED_CHATS and chat_id not in ALLOWED_CHATS:
+        if not is_authorized(chat_id, ALLOWED_CHATS):
             return
 
-        text = msg.get("text") or msg.get("caption") or ""
         if not text:
             return
 
@@ -201,6 +264,13 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    if not ALLOWED_CHATS:
+        log("FATAL: allowed_chat_ids is empty. Refusing to start — this bridge "
+            "runs the Claude CLI on your machine, so an unrestricted bot would let "
+            "anyone execute against it. Set allowed_chat_ids in config.json to the "
+            "Telegram user ID(s) permitted to use the bots.")
+        raise SystemExit(1)
+
     log(f"Telegram → Claude Code Bridge")
     log(f"Port: {PORT} | Agents: {', '.join(BOTS.keys())}")
     log(f"Claude: {CLAUDE_BIN} | Max parallel: {MAX_PARALLEL}")

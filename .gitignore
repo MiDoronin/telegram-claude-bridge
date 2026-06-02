@@ -3,3 +3,6 @@ config.json
 __pycache__/
 .DS_Store
 history/
+.coverage
+.pytest_cache/
+*.egg-info/
