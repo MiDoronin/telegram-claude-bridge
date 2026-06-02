@@ -159,7 +159,10 @@ class WebhookHandler(BaseHTTPRequestHandler):
             return
 
         chat_id = str(msg.get("chat", {}).get("id", ""))
-        if ALLOWED_CHATS and chat_id not in ALLOWED_CHATS:
+        # Fail-closed: only chats explicitly in the allowlist may drive Claude.
+        # An empty allowlist denies everyone (the server refuses to start without
+        # one — see main()), so this never silently allows all.
+        if chat_id not in ALLOWED_CHATS:
             return
 
         text = msg.get("text") or msg.get("caption") or ""
@@ -201,6 +204,13 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    if not ALLOWED_CHATS:
+        log("FATAL: allowed_chat_ids is empty. Refusing to start — this bridge "
+            "runs the Claude CLI on your machine, so an unrestricted bot would let "
+            "anyone execute against it. Set allowed_chat_ids in config.json to the "
+            "Telegram user ID(s) permitted to use the bots.")
+        raise SystemExit(1)
+
     log(f"Telegram → Claude Code Bridge")
     log(f"Port: {PORT} | Agents: {', '.join(BOTS.keys())}")
     log(f"Claude: {CLAUDE_BIN} | Max parallel: {MAX_PARALLEL}")
